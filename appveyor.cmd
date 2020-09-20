@@ -4,7 +4,7 @@
 @set _P=%~dp0build\%_C%\publish
 @set _RCO=/S /R:1 /W:1 /NP /XO  /NS /NC /NFL /NDL /NJH /NJS
 
-nuget restore || exit /b
+msbuild -p:Configuration=%_C% -t:Restore || exit /b
 
 dotnet test -c %_C% src\test\WixToolsetTest.BuildTasks || exit /b
 
