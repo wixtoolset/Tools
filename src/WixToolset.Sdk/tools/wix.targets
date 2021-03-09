@@ -314,123 +314,97 @@
   </PropertyGroup>
 
   <!--
-  ================================================================================================
-  ResolveProjectReferences
+    ============================================================
+    PrepareProjectReferences
 
-    Builds all of the referenced projects to get their outputs.
+    Prepares project references for consumption by other targets.
 
-    [IN]
-    @(NonVCProjectReference) - The list of non-VC project references.
+      [IN]
+      @(ProjectReference) - The list of project references.
 
-    [OUT]
-    @(ProjectReferenceWithConfiguration) - The list of non-VC project references.
-    @(WixLibProjects) - Paths to any .wixlibs that were built by referenced projects.
-  ================================================================================================
+      [OUT]
+      @(ProjectReferenceWithConfiguration)   - Project references with apporpriate metadata
+      @(_MSBuildProjectReferenceExistent)    - Subset of @(ProjectReferenceWithConfiguration) that exist
+                                               with added SetTargetFramework metadata for cross-targeting
+      @(_MSBuildProjectReferenceNonExistent) - Subset of  @(ProjectReferenceWithConfiguration) that do not exist
+    ============================================================
   -->
-  <Target
-    Name="ResolveProjectReferences"
-    DependsOnTargets="AssignProjectConfiguration;_SplitProjectReferencesByFileExistence"
-    Condition=" '@(ProjectReferenceWithConfiguration)' != '' ">
+  <PropertyGroup>
+    <PrepareProjectReferencesDependsOn>
+      AssignProjectConfiguration;
+      _SplitProjectReferencesByFileExistence;
+      _GetProjectReferenceTargetFrameworkProperties
+    </PrepareProjectReferencesDependsOn>
+  </PropertyGroup>
+  <Target Name="PrepareProjectReferences" DependsOnTargets="$(PrepareProjectReferencesDependsOn)" />
 
-    <!-- Issue a warning for each non-existent project. -->
-    <Warning
-      Text="The referenced project '%(_MSBuildProjectReferenceNonexistent.Identity)' does not exist."
-      Condition=" '@(_MSBuildProjectReferenceNonexistent)' != '' " />
+  <!--
+    ============================================================
+                                        ResolveProjectReferences
+
+    Build referenced projects:
+
+        [IN]
+        @(ProjectReferenceWithConfiguration) - The list of project references.
+
+        [OUT]
+        @(_ResolvedNativeProjectReferencePaths) - Paths to referenced native projects.
+        @(_ResolvedProjectReferencePaths) - Paths to referenced managed projects.
+    ============================================================
+    -->
+  <!-- By default, the outputs of project references are passed to the compiler -->
+  <ItemDefinitionGroup>
+    <ProjectReference>
+      <!-- Target to build in the project reference; by default, this property is blank, indicating the default targets-->
+      <Targets>$(ProjectReferenceBuildTargets)</Targets>
+      <!-- Extra item type to emit outputs of the destination into. Defaults to blank. To emit only into this list, set the ReferenceOutputAssembly metadata to false as well. -->
+      <OutputItemType/>
+      <ReferenceSourceTarget>ProjectReference</ReferenceSourceTarget>
+    </ProjectReference>
+  </ItemDefinitionGroup>
+
+  <Target
+      Name="ResolveProjectReferences"
+      DependsOnTargets="PrepareProjectReferences"
+      Returns="@(_ResolvedNativeProjectReferencePaths);@(_ResolvedProjectReferencePaths)">
 
     <!--
-    When building this project from the IDE or when building a .sln from the command line or
-    when only building .wixlib project references, gather the referenced build outputs. The
-    code that builds the .sln will already have built the project, so there's no need to do
-    it again here and when building only .wixlib project references we'll use the results to
-    determine which projects to build.
+    When building this project from the IDE, just gather the referenced build outputs.
+    The IDE will already have built the project, so there's no need to do it again here.
 
-    The ContinueOnError setting is here so that, during project load, as much information as
-    possible will be passed to the compilers.
+    The ContinueOnError setting is here so that, during project load, as
+    much information as possible will be passed to the compilers.
     -->
-    <MSBuild
-      Projects="@(_MSBuildProjectReferenceExistent)"
-      Targets="%(_MSBuildProjectReferenceExistent.Targets);GetTargetPath"
-      Properties="%(_MSBuildProjectReferenceExistent.SetConfiguration);%(_MSBuildProjectReferenceExistent.SetPlatform)"
-      Condition="('$(BuildingSolutionFile)' == 'true' or '$(BuildingInsideVisualStudio)' == 'true' or '$(BuildProjectReferences)' != 'true') and '@(_MSBuildProjectReferenceExistent)' != '' "
-      ContinueOnError="!$(BuildingProject)">
 
-      <Output TaskParameter="TargetOutputs" ItemName="_GatheredProjectReferencePaths" />
+    <MSBuild
+        Projects="@(_MSBuildProjectReferenceExistent)"
+        Targets="GetTargetPath"
+        BuildInParallel="$(BuildInParallel)"
+        Properties="%(_MSBuildProjectReferenceExistent.SetConfiguration); %(_MSBuildProjectReferenceExistent.SetPlatform); %(_MSBuildProjectReferenceExistent.SetTargetFramework)"
+        Condition="'%(_MSBuildProjectReferenceExistent.BuildReference)' == 'true' and '@(ProjectReferenceWithConfiguration)' != '' and ('$(BuildingInsideVisualStudio)' == 'true' or '$(BuildProjectReferences)' != 'true') and '@(_MSBuildProjectReferenceExistent)' != ''"
+        ContinueOnError="!$(BuildingProject)"
+        RemoveProperties="%(_MSBuildProjectReferenceExistent.GlobalPropertiesToRemove)$(_GlobalPropertiesToRemoveFromProjectReferences)">
+
+      <Output TaskParameter="TargetOutputs" ItemName="_ResolvedProjectReferencePaths" Condition="'%(_MSBuildProjectReferenceExistent.ReferenceOutputAssembly)'=='true'"/>
+      <Output TaskParameter="TargetOutputs" ItemName="%(_MSBuildProjectReferenceExistent.OutputItemType)" Condition="'%(_MSBuildProjectReferenceExistent.OutputItemType)' != ''"/>
+
     </MSBuild>
 
     <!--
-    Determine which project references should be built. Note: we will not build any project references
-    if building in the IDE because it builds project references directly.
-
-    If BuildProjectReferences is 'true' (the default) then take all MSBuild project references that exist
-    on disk and add them to the list of things to build. This is the easy case.
-    -->
-    <CreateItem
-      Include="@(_MSBuildProjectReferenceExistent)"
-      Condition=" '$(BuildProjectReferences)' == 'true' and '$(BuildingInsideVisualStudio)' != 'true' ">
-
-      <Output TaskParameter="Include" ItemName="_ProjectReferencesToBuild" />
-    </CreateItem>
-
-    <!--
-    If BuildProjectReferences is 'wixlib' then build only the MSBuild project references that exist and
-    create a .wixlib file. That requires us to first filter the gathered project references down to only
-    those that build .wixlibs.
-    -->
-    <CreateItem
-      Include="@(_GatheredProjectReferencePaths)"
-      Condition=" '$(BuildProjectReferences)' == 'wixlib' and '%(Extension)' == '.wixlib' and '$(BuildingInsideVisualStudio)' != 'true' ">
-
-      <Output TaskParameter="Include" ItemName="_ReferencedWixLibPaths" />
-    </CreateItem>
-
-    <!--
-    The second step when building only 'wixlib' project references is to create the list of existing MSBuild
-    project references that do *not* build a .wixlib. These are the projects that will be skipped.
-     -->
-    <CreateItem
-      Include="@(_MSBuildProjectReferenceExistent->'%(FullPath)')"
-      Exclude="@(_ReferencedWixLibPaths->'%(MSBuildSourceProjectFile)')"
-      Condition=" '$(BuildProjectReferences)' == 'wixlib' and '$(BuildingInsideVisualStudio)' != 'true' ">
-
-      <Output TaskParameter="Include" ItemName="_ProjectReferencesToSkip" />
-    </CreateItem>
-
-    <!--
-    Finally, when building only 'wixlib' project references, the list of projects to build are naturally the
-    list of projects *not* being skipped.
-    -->
-    <CreateItem
-      Include="@(_MSBuildProjectReferenceExistent->'%(FullPath)')"
-      Exclude="@(_ProjectReferencesToSkip)"
-      Condition=" '$(BuildProjectReferences)' == 'wixlib' and '$(BuildingInsideVisualStudio)' != 'true' ">
-
-      <Output TaskParameter="Include" ItemName="_ProjectReferencesToBuild" />
-    </CreateItem>
-
-    <!-- Display a warning for all projects being skipped. -->
-    <Warning
-      Text="BuildProjectReferences set to '$(BuildProjectReferences)'. Skipping the non-Library project: %(_ProjectReferencesToSkip.Identity)"
-      Condition=" '@(_ProjectReferencesToSkip)' != '' " />
-
-    <Message
-      Importance="low"
-      Text="Project reference to build: %(_ProjectReferencesToBuild.Identity), properties: %(_ProjectReferencesToBuild.Properties)"
-      Condition=" '@(_ProjectReferencesToBuild)' != '' " />
-
-    <!--
     Build referenced projects when building from the command line.
-
-    The $(ProjectReferenceBuildTargets) will normally be blank so that the project's default target
-    is used during a P2P reference. However if a custom build process requires that the referenced
-    project has a different target to build it can be specified.
     -->
     <MSBuild
-      Projects="@(_ProjectReferencesToBuild)"
-      Targets="$(ProjectReferenceBuildTargets)"
-      Properties="%(_ProjectReferencesToBuild.SetConfiguration);%(_ProjectReferencesToBuild.SetPlatform)"
-      Condition=" '@(_ProjectReferencesToBuild)' != '' ">
+        Projects="@(_MSBuildProjectReferenceExistent)"
+        Targets="%(_MSBuildProjectReferenceExistent.Targets)"
+        BuildInParallel="$(BuildInParallel)"
+        Properties="%(_MSBuildProjectReferenceExistent.SetConfiguration); %(_MSBuildProjectReferenceExistent.SetPlatform);  %(_MSBuildProjectReferenceExistent.SetTargetFramework)"
+        Condition="'%(_MSBuildProjectReferenceExistent.BuildReference)' == 'true' and '@(ProjectReferenceWithConfiguration)' != '' and '$(BuildingInsideVisualStudio)' != 'true' and '$(BuildProjectReferences)' == 'true' and '@(_MSBuildProjectReferenceExistent)' != ''"
+        ContinueOnError="$(ContinueOnError)"
+        RemoveProperties="%(_MSBuildProjectReferenceExistent.GlobalPropertiesToRemove)$(_GlobalPropertiesToRemoveFromProjectReferences)">
 
-      <Output TaskParameter="TargetOutputs" ItemName="_BuiltProjectReferencePaths" />
+      <Output TaskParameter="TargetOutputs" ItemName="_ResolvedProjectReferencePaths" Condition="'%(_MSBuildProjectReferenceExistent.ReferenceOutputAssembly)'=='true' or '$(DesignTimeBuild)' == 'true'"/>
+      <Output TaskParameter="TargetOutputs" ItemName="%(_MSBuildProjectReferenceExistent.OutputItemType)" Condition="'%(_MSBuildProjectReferenceExistent.OutputItemType)' != ''"/>
+
     </MSBuild>
 
     <!--
@@ -438,21 +412,24 @@
     target return the output for a native .vcxproj.
     -->
     <MSBuild
-      Projects="@(_MSBuildProjectReferenceExistent)"
-      Targets="GetNativeTargetPath"
-      Properties="%(_MSBuildProjectReferenceExistent.SetConfiguration);%(_MSBuildProjectReferenceExistent.SetPlatform)"
-      Condition=" '@(ProjectReferenceWithConfiguration)' != '' and '%(_MSBuildProjectReferenceExistent.Extension)' == '.vcxproj' ">
+        Projects="@(_MSBuildProjectReferenceExistent)"
+        Targets="GetNativeTargetPath"
+        BuildInParallel="$(BuildInParallel)"
+        Properties="%(_MSBuildProjectReferenceExistent.SetConfiguration); %(_MSBuildProjectReferenceExistent.SetPlatform); %(_MSBuildProjectReferenceExistent.SetTargetFramework)"
+        Condition="'%(_MSBuildProjectReferenceExistent.BuildReference)' == 'true' and '%(_MSBuildProjectReferenceExistent.Extension)' == '.vcxproj' and '@(ProjectReferenceWithConfiguration)' != '' and '$(BuildingProject)' == 'true' and '@(_MSBuildProjectReferenceExistent)' != ''"
+        ContinueOnError="$(ContinueOnError)"
+        SkipNonexistentTargets="true"
+        RemoveProperties="%(_MSBuildProjectReferenceExistent.GlobalPropertiesToRemove)$(_GlobalPropertiesToRemoveFromProjectReferences)">
 
       <Output TaskParameter="TargetOutputs" ItemName="_ResolvedProjectReferencePaths" />
       <Output TaskParameter="TargetOutputs" ItemName="_MSBuildResolvedProjectReferencePaths" />
     </MSBuild>
 
-    <!-- Assign the unique gathered and built project references to the resolved project
-         reference paths. -->
-    <RemoveDuplicates Inputs="@(_GatheredProjectReferencePaths);@(_BuiltProjectReferencePaths)">
-      <Output TaskParameter="Filtered" ItemName="_ResolvedProjectReferencePaths" />
-      <Output TaskParameter="Filtered" ItemName="_MSBuildResolvedProjectReferencePaths" />
-    </RemoveDuplicates>
+    <!-- Issue a warning for each non-existent project. -->
+    <Warning
+        Text="The referenced project '%(_MSBuildProjectReferenceNonexistent.Identity)' does not exist."
+        Condition="'@(ProjectReferenceWithConfiguration)' != '' and '@(_MSBuildProjectReferenceNonexistent)' != ''"/>
+
 
     <!-- Create list of all .wixlib project references. -->
     <CreateItem
